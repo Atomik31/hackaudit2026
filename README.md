@@ -1,162 +1,82 @@
-# Agent IA AWS — Dashboard Streamlit sécurisé par Cognito
+# Agent IA HackAudit 2026
 
-Interface Streamlit pour dialoguer avec un agent hébergé sur un **Harness
-Amazon Bedrock AgentCore**, protégée par le flux d'authentification suivant :
+Application web sécurisée qui relie une entreprise cliente et son commissaire
+aux comptes : le client dépose ses documents d'audit, le commissaire les
+analyse avec l'aide d'un agent IA.
 
-1. L'utilisateur se connecte (identifiant / mot de passe) contre un
-   **Cognito User Pool** via le protocole **SRP** — le mot de passe n'est
-   jamais transmis en clair.
-2. Un **MFA** (TOTP ou SMS) est demandé si le pool l'exige.
-3. Les jetons JWT obtenus sont échangés auprès d'un **Cognito Identity
-   Pool**, qui appelle `sts:AssumeRoleWithWebIdentity` et renvoie des
-   **identifiants AWS temporaires** rattachés à un rôle IAM — jamais de clé
-   statique.
-4. Ce rôle IAM est scoppé à la seule action
-   `bedrock-agentcore:InvokeHarness` sur l'ARN du Harness ciblé.
-5. Ces identifiants (renouvelés automatiquement, ~1h) signent en SigV4
-   l'appel `InvokeHarness`.
+## 1. Connexion sécurisée
 
-> Une ressource `arn:...:harness/<id>` est invoquée via **`InvokeHarness`**
-> (format de messages façon Bedrock Converse, réponse en flux d'événements),
-> pas via `InvokeAgentRuntime` (réservé aux runtimes autonomes de type
-> `arn:...:runtime/<id>`, qui existe en parallèle pour chaque Harness mais
-> ne s'invoque pas directement).
+La connexion passe par **Amazon Cognito**, pas par un système maison :
 
-## Arborescence
+- Le mot de passe n'est **jamais transmis en clair** (protocole SRP).
+- Un **code à deux facteurs (MFA)** peut être exigé selon la configuration.
+- Une fois connecté, l'application échange la session contre des
+  **identifiants AWS temporaires** (valables ~1h, renouvelés automatiquement)
+  — il n'y a **aucune clé AWS fixe** stockée nulle part dans l'app.
 
-```
-app.py                 # UI Streamlit (login, MFA, chat)
-src/config.py           # chargement de la configuration
-src/cognito_auth.py      # authentification User Pool (SRP + MFA)
-src/aws_identity.py       # échange JWT -> identifiants AWS temporaires
-src/agent_client.py        # appel InvokeHarness
-```
+Ce que voit l'utilisateur après connexion dépend uniquement de son **groupe**
+(client ou commissaire) — pas d'écran unique pour tout le monde.
 
-## Installation
+## 2. Espace client — dépôt de documents
+
+Un utilisateur rattaché à une entreprise cliente arrive directement sur une
+page de dépôt :
+
+- Il glisse ses fichiers (factures, bons de commande, etc.) — ils partent
+  vers un espace de stockage (bucket S3) **réservé exclusivement à son
+  entreprise**.
+- Si un même utilisateur gère plusieurs entreprises, un menu déroulant lui
+  permet de choisir dans laquelle déposer.
+- La liste des documents déjà déposés s'affiche en dessous, pour vérifier
+  ce qui a déjà été transmis.
+
+**Cloisonnement réel, pas juste visuel** : l'isolation entre entreprises est
+appliquée au niveau des permissions AWS elles-mêmes (pas seulement dans
+l'interface) — un client ne peut techniquement pas accéder au bucket d'une
+autre entreprise, même en contournant l'interface.
+
+## 3. Espace commissaire — page d'analyse
+
+Un utilisateur commissaire aux comptes arrive sur une interface de type chat :
+
+1. Il choisit le **dossier client** à traiter dans un menu déroulant.
+2. Les documents déjà déposés par ce client s'affichent.
+3. Il pose sa demande en langage naturel, par exemple :
+   - *« Fais-moi un rapport de pré-audit sur ce document. »*
+   - *« Vérifie que la facture et le bon de commande correspondent bien
+     (fournisseur, montant, articles), et signale tout oubli. »*
+
+Derrière l'interface, deux étapes s'enchaînent **toujours dans le même
+ordre**, gérées par l'application elle-même (pas laissées au hasard d'une
+décision de l'IA) :
+
+- **Extraction** : chaque document est lu tel quel (texte direct, ou OCR via
+  Amazon Textract pour les PDF/images) — jamais deviné.
+- **Vérification** : le contenu réellement extrait est envoyé à l'agent pour
+  analyse, comparaison et détection d'anomalies.
+
+Résultat : la réponse affichée s'appuie toujours sur le contenu réel des
+documents déposés, jamais sur une supposition de l'IA.
+
+## Configuration (pour lancer le projet)
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-créer un fichier .env à la racine (voir le tableau ci-dessous pour les variables)
+# créer un fichier .env à la racine (voir clients.json pour la structure
+# des espaces clients, et les variables COGNITO_*/AGENT_* pour l'accès AWS)
 streamlit run app.py
 ```
 
-## Configuration (`.env` ou `.streamlit/secrets.toml`)
+Déploiement en production : voir `Dockerfile` / `docker-compose.yml`
+(conteneurisé, pensé pour tourner derrière un reverse proxy avec TLS).
 
-| Variable | Description |
-|---|---|
-| `AWS_REGION` | Région du User Pool / Identity Pool / Harness |
-| `COGNITO_USER_POOL_ID` | ID du User Pool |
-| `COGNITO_APP_CLIENT_ID` | App client utilisé par l'app (voir ci-dessous) |
-| `COGNITO_APP_CLIENT_SECRET` | Vide si l'app client est public |
-| `COGNITO_IDENTITY_POOL_ID` | ID de l'Identity Pool |
-| `AGENT_HARNESS_ARN` | ARN du Harness AgentCore (`arn:...:harness/<id>`) |
-| `AGENT_HARNESS_QUALIFIER` | Optionnel (alias de version) |
+## Sécurité — en bref
 
-L'application tourne côté serveur (pas dans le navigateur), donc un app
-client **avec secret** (`generate_secret`) est recommandé pour plus de
-robustesse — le secret ne sort jamais du process Streamlit.
-
-## Provisionnement AWS (une fois)
-
-### 1. User Pool avec MFA obligatoire
-
-```bash
-aws cognito-idp create-user-pool \
-  --pool-name hackaudit-agent-dashboard \
-  --mfa-configuration ON \
-  --enabled-mfas SOFTWARE_TOKEN_MFA \
-  --policies '{"PasswordPolicy":{"MinimumLength":12,"RequireUppercase":true,"RequireLowercase":true,"RequireNumbers":true,"RequireSymbols":true}}' \
-  --user-pool-add-ons '{"AdvancedSecurityMode":"ENFORCED"}'
-
-aws cognito-idp create-user-pool-client \
-  --user-pool-id <USER_POOL_ID> \
-  --client-name streamlit-dashboard \
-  --generate-secret \
-  --explicit-auth-flows ALLOW_USER_SRP_AUTH ALLOW_REFRESH_TOKEN_AUTH
-```
-
-> Onboarding d'un utilisateur : `admin-create-user` avec mot de passe
-> temporaire, puis lors de sa toute première connexion, l'utilisateur
-> définit son mot de passe permanent et enrôle son TOTP (à faire une fois,
-> via la Hosted UI ou un écran d'onboarding dédié — cette app suppose que le
-> compte est déjà provisionné et gère uniquement les connexions récurrentes
-> avec MFA déjà enrôlé).
-
-### 2. Identity Pool + rôle IAM scoppé
-
-```bash
-aws cognito-identity create-identity-pool \
-  --identity-pool-name hackaudit_agent_dashboard \
-  --no-allow-unauthenticated-identities \
-  --cognito-identity-providers ProviderName=cognito-idp.<REGION>.amazonaws.com/<USER_POOL_ID>,ClientId=<APP_CLIENT_ID>,ServerSideTokenCheck=true
-```
-
-Rôle IAM (trust policy — assumable uniquement via cette Identity Pool, pour
-des identités authentifiées) :
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"Federated": "cognito-identity.amazonaws.com"},
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringEquals": {"cognito-identity.amazonaws.com:aud": "<IDENTITY_POOL_ID>"},
-      "ForAnyValue:StringLike": {"cognito-identity.amazonaws.com:amr": "authenticated"}
-    }
-  }]
-}
-```
-
-Politique inline (moindre privilège, un seul Harness) :
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": "bedrock-agentcore:InvokeHarness",
-    "Resource": "arn:aws:bedrock-agentcore:us-east-1:377152275173:harness/Agent_RAG-9mya02G5gI"
-  }]
-}
-```
-
-Rattachement du rôle par défaut :
-
-```bash
-aws cognito-identity set-identity-pool-roles \
-  --identity-pool-id <IDENTITY_POOL_ID> \
-  --roles authenticated=<ROLE_ARN>
-```
-
-### 3. (optionnel) Rôles différenciés par groupe Cognito
-
-Créer des groupes (`admin`, `user`), puis du role mapping basé sur la
-revendication `cognito:groups` :
-
-```bash
-aws cognito-idp create-group --user-pool-id <USER_POOL_ID> --group-name admin
-aws cognito-idp create-group --user-pool-id <USER_POOL_ID> --group-name user
-
-aws cognito-identity set-identity-pool-roles \
-  --identity-pool-id <IDENTITY_POOL_ID> \
-  --roles authenticated=<ROLE_USER_ARN> \
-  --role-mappings "cognito-idp.<REGION>.amazonaws.com/<USER_POOL_ID>:<APP_CLIENT_ID>={Type=Rules,AmbiguousRoleResolution=Deny,RulesConfiguration={Rules=[{Claim=cognito:groups,MatchType=Contains,Value=admin,RoleARN=<ROLE_ADMIN_ARN>}]}}"
-```
-
-## Sécurité
-
-- Aucune clé AWS statique : uniquement des identifiants temporaires dérivés
-  de la session Cognito, renouvelés automatiquement (~1h) tant que
-  l'utilisateur reste connecté.
-- Le rôle IAM assumé est scoppé au strict minimum (une seule action, un seul
-  ARN de ressource).
-- MFA obligatoire au niveau du pool (`--mfa-configuration ON`) +
-  `AdvancedSecurityMode=ENFORCED` (détection de connexions à risque).
-- Les erreurs d'authentification sont volontairement génériques
-  (« Identifiants incorrects ») pour éviter l'énumération de comptes.
-- Ne commitez jamais `.env` ni `.streamlit/secrets.toml` (déjà exclus via
-  `.gitignore`).
+- Aucune clé AWS statique : uniquement des identifiants temporaires liés à
+  la session Cognito de chaque utilisateur.
+- Un rôle IAM distinct par groupe d'utilisateurs, scoppé au strict
+  nécessaire (un client ne peut toucher que son propre bucket).
+- Les erreurs de connexion sont volontairement génériques pour éviter
+  l'énumération de comptes.
+- `.env` (secrets) n'est jamais versionné (voir `.gitignore`).
