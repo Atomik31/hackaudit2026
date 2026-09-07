@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    container_name: hackaudit-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Pas de port publié sur l'hôte : Traefik (déjà en place sur ce VPS,
+    # network_mode host) route directement vers l'IP interne du conteneur
+    # via le socket Docker, comme pour les autres apps de ce serveur
+    # (ex. parking-dashboard). Publier le port entrerait en conflit avec
+    # les apps existantes qui l'utilisent déjà.
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.hackaudit.entrypoints=websecure"
+      - "traefik.http.routers.hackaudit.rule=Host(`${HACKAUDIT_HOSTNAME}`)"
+      - "traefik.http.routers.hackaudit.tls.certresolver=letsencrypt"
+      - "traefik.http.services.hackaudit.loadbalancer.server.port=8501"

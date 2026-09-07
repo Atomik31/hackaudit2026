@@ -1,0 +1,23 @@
+{
+  "workspaces": {
+    "test-alpha": {
+      "label": "Client Test Alpha",
+      "bucket": "hackaudit-client-test-alpha-eu",
+      "bucket_region": "eu-west-3",
+      "extract_tool": "extract-test-alpha___Extraction",
+      "verify_tool": "verify___Verification"
+    },
+    "test-beta": {
+      "label": "Client Test Beta",
+      "bucket": "hackaudit-client-test-beta-eu",
+      "bucket_region": "eu-west-3",
+      "extract_tool": "extract-test-beta___Extraction",
+      "verify_tool": "verify___Verification"
+    }
+  },
+  "client_groups": {
+    "test-alpha": ["test-alpha"],
+    "test-beta": ["test-beta"],
+    "multi": ["test-alpha", "test-beta"]
+  }
+}
