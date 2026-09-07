@@ -15,18 +15,21 @@ Flux implémenté :
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import jwt
 import streamlit as st
 
 from src import cognito_auth
-from src.aws_identity import exchange_id_token_for_credentials, whoami
+from src.aws_identity import exchange_id_token_for_credentials
 from src.config import load_config
 from src.s3_deposit import list_documents, upload_document
 from src.sub_agents import SubAgentError, extract_document, verify_content
 
-st.set_page_config(page_title="Agent IA HACKAUDIT 2026 AWS", page_icon="🤖", layout="wide")
+st.set_page_config(
+    page_title="Agent IA HACKAUDIT 2026 AWS",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 
 # --------------------------------------------------------------------------
@@ -221,34 +224,10 @@ def _resolve_role(config, claims: dict) -> tuple[str | None, list[str]]:
     return None, []
 
 
-def _render_sidebar(config, credentials, role: str | None, workspace_slugs: list[str]) -> None:
-    claims = _decode_claims(st.session_state.cognito_user.id_token)
-    groups = claims.get("cognito:groups", [])
-
-    with st.sidebar:
-        st.subheader("Session")
-        st.markdown(f"**Utilisateur :** {claims.get('email') or claims.get('cognito:username', '—')}")
-        if groups:
-            st.markdown(f"**Groupes Cognito :** {', '.join(groups)}")
-        if role == "commissaire":
-            st.markdown("**Rôle applicatif :** Commissaire aux comptes")
-        elif role == "client":
-            labels = ", ".join(config.workspaces[s].label for s in workspace_slugs)
-            st.markdown(f"**Rôle applicatif :** Client — {labels}")
-        else:
-            st.markdown("**Rôle applicatif :** aucun rôle reconnu")
-
-        role_arn = whoami(credentials, config.resource_region)
-        if role_arn:
-            st.markdown(f"**Rôle IAM assumé :**\n`{role_arn}`")
-
-        remaining = (credentials.expiration - datetime.now(timezone.utc)).total_seconds()
-        remaining = max(0, int(remaining))
-        st.markdown(f"**Identifiants AWS valides encore :** {remaining // 60} min {remaining % 60} s")
-        st.caption("Renouvelés automatiquement tant que la session reste active — aucune clé statique.")
-
-        st.divider()
-        if st.button("Se déconnecter", use_container_width=True):
+def _render_header() -> None:
+    _, col_button = st.columns([10, 1])
+    with col_button:
+        if st.button("Déconnexion", use_container_width=True):
             _reset_session()
             st.rerun()
 
@@ -401,7 +380,7 @@ def main() -> None:
         credentials = _get_valid_credentials(config)
         claims = _decode_claims(st.session_state.cognito_user.id_token)
         role, workspace_slugs = _resolve_role(config, claims)
-        _render_sidebar(config, credentials, role, workspace_slugs)
+        _render_header()
 
         if role == "client":
             _render_deposit(config, credentials, workspace_slugs)
